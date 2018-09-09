@@ -1,0 +1,754 @@
+---
+title: "Final project"
+author: "Alfonso D'Amelio"
+date: "20/6/2018"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rjags)
+library(R2jags)
+library(coda)
+library(ggmcmc)
+```
+
+# Orange tree growth: a nonlinear mixed-effects models
+
+## Introduction 
+
+In this document i'll led a fully bayesian analysis dealing with the growth of the circumference of a population of orange trees.
+
+The main topics will be covered are:
+
++ Simple statistics and differences between the growth of different types of trees.
+
++ Apply three different nonlinear mixed-effects statistical models and evaluate the estimation performance of models implemented.
+
++ Evaluate the best statistical model according to the **DIC** (*Deviance Information Criterion*).
+
++ Once reconstruct the tree's profile and chosen the best model, evaluate the chains obtained by **JAGS** simulations and visualize the approximated marginal posteriors.
+
+
+## Data Description
+
+The orange tree growth data, originally taken from Draper & Smith (1981) and reproduced in Draper & Smith (1998), was used by Pinheiro & Bates (2000) to illustrate how a *logistic* growth curve model with random effects can be implemented with the **S-Plus** function nlme. 
+
+The data contain measurements of trunk circumferences (mm) made at seven occasions for each of five orange trees, over roughly a four year period of growth shown in the Figure 1.
+
+During this study could be interesting analyze and describe the average growth pattern in the population,for example how the mean of the circumference in the orange trees population changes over time.
+
+It may also be interesting how the growth of individual trees vary across the population.
+
+
+```{r figs, fig.width=5, fig.height=4, fig.align='center',echo=FALSE}
+library(png)
+library(grid)
+img = readPNG("/Users/alfonsodamelio/Desktop/data.png")  
+grid.raster(img)
+```
+
+\newpage 
+
+Orange tree growth data are an example of *longitudinal data*, sometimes called panel data,a collection of repeated observations of the same subjects (trunk circumferences), taken from a larger population (trees), over a period of time – and is useful for measuring change. 
+
+Longitudinal data differs from cross-sectional data because it follows the same subjects over a period of time, while cross-sectional data samples different subjects (whether individuals, firms, countries or regions) at each point in time.
+
+
+At this point we are able to make a simple visualization of the growth for each of the five trees; underlying the  flattish "S" shape before explained and the increasing of the difference (growth) between trees population according to the age. 
+
+
+```{r growth profile plot}
+data <- list(n = 7, K = 5, 
+              x = c(118.00, 484.00, 664.00, 1004.00, 1231.00, 1372.00, 1582.00),
+              Y = matrix( c(30.00, 58.00, 87.00, 115.00, 120.00, 142.00, 145.00, 
+                          33.00, 69.00, 111.00, 156.00, 172.00, 203.00, 203.00, 
+                          30.00, 51.00, 75.00, 108.00, 115.00, 139.00, 140.00, 
+                          32.00, 62.00, 112.00, 167.00, 179.00, 209.00, 214.00, 
+                          30.00, 49.00, 81.00, 125.00, 142.00, 174.00, 177.00), 
+                          nrow = 5, ncol = 7, byrow = TRUE))
+n = 7
+K = 5
+ages <- data$x
+matplot(ages, t(data$Y), type = "b", lwd = 3, 
+        xlab = "Age (days)", ylab = "Circumference (mm)",lty = 1,xaxt='n')
+axis(1, at= seq(118,1800,250),labels = c(118, 484, 664, 1004, 1231, 1372, 1582))
+legend('topleft',legend = c('Tree 1','Tree 2','Tree 3','Tree 4','Tree 5'),col=c('black','red','green3','blue','aquamarine'),lwd=3,bty = "n")
+title(main= "Orange trees trunk\ncircumference growth")
+
+
+```
+
+
+
+## Intro to NLME (Non-linear Mixed Effects Model)
+
+As far as we said before, in this model mixed effects occur non-linearly in the response variable $y$.
+The general formula of the NLME suggested by  Lindstrom and Bates (1990) is:
+
+$${y} = {f}(\boldsymbol{\phi,X}) + \boldsymbol{\epsilon}, \quad \text{where} \quad \boldsymbol{\phi} = \boldsymbol{A\beta + Bb}$$
+
+where $y$ is the response vector, $f$ is a general non-linear function, $\boldsymbol{\phi}$ is a mixed effects parameter vector that is expressed as a linear combination of _fixed effects_ $\boldsymbol{\beta}$ and _random effects_ $b$, $X$ is the matrix of covariates, $\boldsymbol{\epsilon}$ is the error vector, $A,B$ are the design matrices for fixed and random effects respectively.
+
+Moreover $b \sim N(0,D)$, $\boldsymbol{\epsilon} \sim N(0,\boldsymbol{\Lambda})$, with $\boldsymbol{\epsilon}$ and $b$ independent.
+
+
+## Model
+
+### Description
+
+Pinheiro and Bates (2000) used the following mixed-effects logistic model to analyze the orange tree growth data:
+
+$$y_{ij} = \frac{\phi_{i1}}{1 + exp\bigg(−\frac{(x_{ij} −\phi_{i2})}{\phi_{i3}}\bigg)}+\epsilon_{ij}, \quad \epsilon_{ij}\sim N(0,\sigma^2)$$
+
+where:
+
+- $y_{ij}$ is the circumference of tree $i$ at time $j$, $x$ is the age in days.
+- $\phi_{i1}$: linear combination of the first fixed effect $\beta_1$ and eventually a random effect $b_{i1}$.
+- $\phi_{i2}$: linear combination of the first fixed effect $\beta_2$ and eventually a random effect $b_{i2}$.  
+- $\phi_{i3}$: linear combination of the first fixed effect $\beta_3$ and eventually a random effect $b_{i3}$.
+
+
+```{r parameters meaning, fig.width=5, fig.height=3, fig.align='center', echo=FALSE}
+# install.packages("png")
+library(png)
+library(grid)
+img = readPNG("/Users/alfonsodamelio/Desktop/FinalProject/parametersmeaning.png") 
+grid.raster(img)
+```
+
+In the figure above is reported the profile of the logistic function with its 3 fixed effects paramaters which describe:  
+- $\beta_1$: is the asympotic circumference  
+- $\beta_2$: is the time at which half of the asymptotic value is reached  
+- $\beta_3$: is the measure for the curvature at $\beta_2$
+
+Lindstrom and Bates (1990) concluded in their analysis (which is the first model implemented) that only the asymptotic circumference needed a random effect to account the tree-to-tree variation, so only $\phi_{i1}$ can be expressed as a linear combination of fixed and random effects.
+Anyway, in this study we will try to check/demonstrate the presence of other random effects on $\beta_2$ and $\beta_3$, adopting similar models.
+
+### DAG
+
+```{r}
+require(igraph)
+graph <- make_empty_graph(directed=T)
+graph <- graph + vertex(name=expression(x[ij])) + vertex(name=expression(y[ij])) + vertex(name=expression(phi[i1])) + vertex(name=expression(epsilon[ij])) + vertex(name=expression(phi[i3])) + vertex(name=expression(phi[i2]))
+graph <- graph + edge(2, 1)+ edge(3, 2)+ edge(4, 2) + edge(5, 2) + edge(6, 2)
+l <- layout_with_fr(graph)
+set.seed(13)
+plot(graph,vertex.size=25,edge.arrow.size=0.9,edge.color='black',main="Graphical Model DAG",vertex.color="lightsteelblue2",layout=l)
+```
+
+# Model implemented in JAGS
+
++ **First model with random effect only in $\phi_{i1}$**
+
+$$\text{Model 1: } \quad \begin{matrix}
+{A}_{i} = {I}\\
+{B}_{i} = (1,0,0)^{T}\\
+\boldsymbol{\beta} = (\beta_1, \beta_2, \beta_3)
+\end{matrix}    \quad \left\{\begin{matrix}
+\phi_{i1} = \beta_1 + b_{i1}\\ 
+\phi_{i2} = \beta_2\\ 
+\phi_{i3} = \beta_3\\ 
+\phi_{i1} \sim  N(\mu_1,\tau_1)\\ 
+\phi_{i2} = \phi_2 \sim  N(0,\tau = 0.0001)\\ 
+\phi_{i3} = \phi_3 \sim  N(0,\tau = 0.0001)\\ 
+\mu_{1} \sim  N(0,0.0001)\\ 
+\tau_{1} \sim  \Gamma(0.001,0.001)\\ 
+\tau_C \sim  \Gamma(0.001,0.001)
+\end{matrix}\right.$$  
+
++  **Second model with random effect both in $\phi_{i1}$ and $\phi_{i2}$**
+
+$$\text{Model 2: } \quad \begin{matrix}
+{A}_{i} = {I}\\
+{B}_{i} = (1,1,0)^{T}\\
+\boldsymbol{\beta} = (\beta_1, \beta_2, \beta_3)
+\end{matrix}    \quad \left\{\begin{matrix}
+\phi_{i1} = \beta_1 + b_{i1}\\ 
+\phi_{i2} = \beta_2 + b_{i2}\\ 
+\phi_{i3} = \beta_3\\ 
+\phi_{i1} \sim  N(\mu_1,\tau_1)\\ 
+\phi_{i2} \sim  N(\mu_2,\tau_2)\\ 
+\phi_{i3} = \phi_3 \sim  N(0,\tau = 0.0001)\\ 
+\mu_{1} \sim  N(0,0.0001)\\ 
+\mu_{2} \sim  N(0,0.0001)\\
+\tau_{1} \sim  \Gamma(0.001,0.001)\\ 
+\tau_{2} \sim  \Gamma(0.001,0.001)\\ 
+\tau_C \sim  \Gamma(0.001,0.001)
+\end{matrix}\right.$$  
+
++ **Third model with random effect in $\phi_{i1}$, $\phi_{i2}$ and also in $\phi_{i3}$**
+
+$$\text{Model 3: } \quad \begin{matrix}
+{A}_{i} = {I}\\
+{B}_{i} = (1,1,1)^{T}\\
+\boldsymbol{\beta} = (\beta_1, \beta_2, \beta_3)
+\end{matrix}    \quad \left\{\begin{matrix}
+\phi_{i1} = \beta_1 + b_{i1}\\ 
+\phi_{i2} = \beta_2 + b_{i2}\\ 
+\phi_{i3} = \beta_3 + b_{i3}\\ 
+\phi_{i1} \sim  N(\mu_1,\tau_1)\\ 
+\phi_{i2} \sim  N(\mu_2,\tau_2)\\ 
+\phi_{i3} \sim  N(\mu_3,\tau_3)\\ 
+\mu_{1} \sim  N(0,0.0001)\\ 
+\mu_{2} \sim  N(0,0.0001)\\
+\mu_{3} \sim  N(0,0.0001)\\
+\tau_{1} \sim  \Gamma(0.001,0.001)\\ 
+\tau_{2} \sim  \Gamma(0.001,0.001)\\ 
+\tau_{3} \sim  \Gamma(0.001,0.001)\\ 
+\tau_C \sim  \Gamma(0.001,0.001)
+\end{matrix}\right.$$
+
+For each of these 3 models we will evaluate their ability of recover their parameters and we will evaluate the **DIC** in order to identify the _best_ model that can deal with these data.
+
+## What is the **DIC**?
+
+The deviance information criterion (DIC) is a hierarchical modeling generalization of the Akaike information criterion (AIC) and the Bayesian information criterion (BIC). It is particularly useful in Bayesian model selection problems where the posterior distributions of the models have been obtained by Markov chain Monte Carlo (MCMC) simulation (our case).
+
+We define the:
+
+1- *Deviance* as  $D(\theta )=-2\log(p(y|\theta))+C,$
+
+2- then we have $p_{D}={\bar  {D}}-D({\bar  {\theta }})$ which is the *effective number of parameters of the model*.
+
+So:
+$${\mathit  {DIC}}=D({\bar  {\theta }})+2p_{D}$$
+The general idea is that models with smaller DIC should be preferred to models with larger DIC.
+
+
+\newpage
+### Model 1
+
+The corresponding JAGS code is the following:
+
+```{r JAGS model1, fig.width=3, fig.height=3, fig.align='center', echo=FALSE}
+# install.packages("png")
+library(png)
+library(grid)
+# img = readPNG("/home/frld/DataScience/SDS2/")  # LINUX
+img = readPNG("/Users/alfonsodamelio/Desktop/FinalProject/bugsmodel_1eff.png") 
+grid.raster(img)
+```
+
+```{r model1}
+parameters = c("mu1","tau1","sigma1","tauC","sigmaC","phi1","phi2","phi3")
+inits = list(phi1=rep(0,data$K),phi2 =0, phi3=1, mu1=0, tau1=0.1, tauC=1)
+initial.values = list(inits)
+
+orange1 = jags( data = data,  inits = initial.values,
+               parameters.to.save = parameters,
+               model.file = "orange_trees_model_v2.txt",
+               n.chain = 1,
+               n.iter = 10000,
+               n.burnin = 1000,
+               n.thin = 1,
+               working.directory = "/Users/alfonsodamelio/Desktop/FinalProject",
+               DIC = TRUE)
+print(orange1)
+```
+
+
+### Model 2
+
+```{r JAGS model2, fig.width=3, fig.height=3, fig.align='center', echo=FALSE}
+# install.packages("png")
+library(png)
+library(grid)
+# img = readPNG("/home/frld/DataScience/SDS2/")  # LINUX
+img = readPNG("/Users/alfonsodamelio/Desktop/FinalProject/bugsmodel_2eff.png") 
+grid.raster(img)
+```
+
+```{r model2}
+parameters = c("mu1","tau1","mu2","tau2","sigma1","sigma2","tauC","sigmaC","phi1","phi2","phi3")
+inits = list(phi1=rep(0,data$K), phi2 =rep(0,data$K), 
+             phi3=1, mu1=0, mu2=0, tau1=0.1, tau2=0.1, tauC=1)
+initial.values = list(inits)
+
+orange2 = jags( data = data,  inits = initial.values,
+                parameters.to.save = parameters,
+                model.file = "orange_trees_model_v3.txt",
+                n.chain = 1,
+                n.iter = 10000,
+                n.burnin = 1000,
+                n.thin = 1,
+                working.directory = "/Users/alfonsodamelio/Desktop/FinalProject",
+                DIC = TRUE)
+print(orange2)
+```
+
+
+### Model 3
+
+```{r JAGS model3, fig.width=3, fig.height=3, fig.align='center', echo=FALSE}
+# install.packages("png")
+library(png)
+library(grid)
+# img = readPNG("/home/frld/DataScience/SDS2/")  # LINUX
+img = readPNG("/Users/alfonsodamelio/Desktop/FinalProject/bugsmodel_3eff.png")
+grid.raster(img)
+```
+
+```{r model3}
+parameters = c("mu1","tau1","mu2","tau2","mu3","tau3",
+               "sigma1","sigma2","sigma3","tauC","sigmaC","phi1","phi2","phi3")
+inits = list(phi1=rep(0,data$K), phi2 =rep(0,data$K),
+             phi3=rep(1,data$K), mu1=0, mu2=0, mu3=0,
+             tau1=0.1, tau2=0.1, tau3=0.1, tauC=1)
+initial.values = list(inits)
+
+orange3 = jags( data = data,  inits = initial.values,
+                parameters.to.save = parameters,
+                model.file = "orange_trees_model_v4.txt",
+                n.chain = 1,
+                n.iter = 10000,
+                n.burnin = 1000,
+                n.thin = 1,
+                working.directory = "/Users/alfonsodamelio/Desktop/FinalProject",
+                DIC = TRUE)
+print(orange3)
+```
+
+At this point i save the output of jags (chain) for each parameter in arrays, building up a structure that allow me to reconstruct than the profile of each tree according to the three different model used.
+
+```{r}
+# MODEL 1
+mu1 = mcmc(orange1$BUGSoutput$sims.array[,1,c("mu1")])
+sigma1 = mcmc(orange1$BUGSoutput$sims.array[,1,c("sigma1")])
+sigmaC = mcmc(orange1$BUGSoutput$sims.array[,1,c("sigmaC")])
+
+phi1 = list()
+phi1$i1 = mcmc(orange1$BUGSoutput$sims.array[,1,c("phi1[1]")])
+phi1$i2 = mcmc(orange1$BUGSoutput$sims.array[,1,c("phi1[2]")])
+phi1$i3 = mcmc(orange1$BUGSoutput$sims.array[,1,c("phi1[3]")])
+phi1$i4 = mcmc(orange1$BUGSoutput$sims.array[,1,c("phi1[4]")])
+phi1$i5 = mcmc(orange1$BUGSoutput$sims.array[,1,c("phi1[5]")])
+
+phi2 = mcmc(orange1$BUGSoutput$sims.array[,1,c("phi2")])
+phi3 = mcmc(orange1$BUGSoutput$sims.array[,1,c("phi3")])
+
+f1 = matrix(ncol = 7, nrow = 5)
+for(i in 1:7){
+  f1[1,i] = mean(phi1$i1/(1+exp(-(ages[i]-phi2)/phi3)))
+  f1[2,i] = mean(phi1$i2/(1+exp(-(ages[i]-phi2)/phi3)))
+  f1[3,i] = mean(phi1$i3/(1+exp(-(ages[i]-phi2)/phi3)))
+  f1[4,i] = mean(phi1$i4/(1+exp(-(ages[i]-phi2)/phi3)))
+  f1[5,i] = mean(phi1$i5/(1+exp(-(ages[i]-phi2)/phi3)))
+}
+
+# MODEL 2
+mu1 = mcmc(orange2$BUGSoutput$sims.array[,1,c("mu1")])
+mu2 = mcmc(orange2$BUGSoutput$sims.array[,1,c("mu2")])
+
+sigma1 = mcmc(orange2$BUGSoutput$sims.array[,1,c("sigma1")])
+sigma2 = mcmc(orange2$BUGSoutput$sims.array[,1,c("sigma2")])
+sigmaC = mcmc(orange2$BUGSoutput$sims.array[,1,c("sigmaC")])
+
+phi1 = list()
+phi1$i1 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[1]")])
+phi1$i2 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[2]")])
+phi1$i3 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[3]")])
+phi1$i4 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[4]")])
+phi1$i5 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[5]")])
+
+phi2 = list()
+phi2$i1 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[1]")])
+phi2$i2 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[2]")])
+phi2$i3 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[3]")])
+phi2$i4 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[4]")])
+phi2$i5 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[5]")])
+phi3 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi3")])
+
+f2 = matrix(ncol = 7, nrow = 5)
+for(i in 1:7){
+  f2[1,i] = mean(phi1$i1/(1+exp(-(ages[i]-phi2$i1)/phi3)))
+  f2[2,i] = mean(phi1$i2/(1+exp(-(ages[i]-phi2$i2)/phi3)))
+  f2[3,i] = mean(phi1$i3/(1+exp(-(ages[i]-phi2$i3)/phi3)))
+  f2[4,i] = mean(phi1$i4/(1+exp(-(ages[i]-phi2$i4)/phi3)))
+  f2[5,i] = mean(phi1$i5/(1+exp(-(ages[i]-phi2$i5)/phi3)))
+}
+
+
+# MODEL 3
+mu1 = mcmc(orange3$BUGSoutput$sims.array[,1,c("mu1")])
+mu2 = mcmc(orange3$BUGSoutput$sims.array[,1,c("mu2")])
+mu3 = mcmc(orange3$BUGSoutput$sims.array[,1,c("mu3")])
+
+sigma1 = mcmc(orange3$BUGSoutput$sims.array[,1,c("sigma1")])
+sigma2 = mcmc(orange3$BUGSoutput$sims.array[,1,c("sigma2")])
+sigma3 = mcmc(orange3$BUGSoutput$sims.array[,1,c("sigma3")])
+sigmaC = mcmc(orange3$BUGSoutput$sims.array[,1,c("sigmaC")])
+
+phi1 = list()
+phi1$i1 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi1[1]")])
+phi1$i2 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi1[2]")])
+phi1$i3 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi1[3]")])
+phi1$i4 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi1[4]")])
+phi1$i5 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi1[5]")])
+
+phi2 = list()
+phi2$i1 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi2[1]")])
+phi2$i2 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi2[2]")])
+phi2$i3 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi2[3]")])
+phi2$i4 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi2[4]")])
+phi2$i5 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi2[5]")])
+
+phi3 = list()
+phi3$i1 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi3[1]")])
+phi3$i2 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi3[2]")])
+phi3$i3 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi3[3]")])
+phi3$i4 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi3[4]")])
+phi3$i5 = mcmc(orange3$BUGSoutput$sims.array[,1,c("phi3[5]")])
+
+f3 = matrix(ncol = 7, nrow = 5)
+for(i in 1:7){
+  f3[1,i] = mean(phi1$i1/(1+exp(-(ages[i]-phi2$i1)/phi3$i1)))
+  f3[2,i] = mean(phi1$i2/(1+exp(-(ages[i]-phi2$i2)/phi3$i2)))
+  f3[3,i] = mean(phi1$i3/(1+exp(-(ages[i]-phi2$i3)/phi3$i3)))
+  f3[4,i] = mean(phi1$i4/(1+exp(-(ages[i]-phi2$i4)/phi3$i4)))
+  f3[5,i] = mean(phi1$i5/(1+exp(-(ages[i]-phi2$i5)/phi3$i5)))
+}
+```
+
+
+\newpage
+
+## Model selection
+We have two ways for determining which is the best model for these data:  
+
+1. We can visually inspect the fit of all models: upon reconstructed the profiles of the growth of each tree under each of the 3 models, we can visualize them e check wheter they follow the behaviour of the logistic function 
+
+2. We can evaluate the DIC (Deviance Information Criterion): as said before $\rightarrow$the lower the DIC, the better the model.
+
+### Models fits
+```{r}
+# tree 1
+matplot(ages, f1[1,], type = "l", lwd=2, ylab = "Circumference (mm)",xaxt='n')
+points(ages, data$Y[1,], type = "l", col="red", lwd=2)
+points(ages, f2[1,], type = "l", col="blue", lwd=2)
+points(ages, f3[1,], type = "l", col="green3", lwd=2)
+title(main="TREE 1 - Profile reconstruction")
+legend(x="topleft", bty="n", legend = c("model1","origin","model2","model3"),
+       col=c("black","red","blue","green3"), lwd = 4)
+axis(1, at= seq(118,1800,250),labels = c(118, 484, 664, 1004, 1231, 1372, 1582))
+
+```
+\newpage
+```{r}
+# tree 2
+matplot(ages, f1[2,], type = "l", lwd=2, ylab = "Circumference (mm)",xaxt='n')
+points(ages, data$Y[2,], type = "l", col="red", lwd=2)
+points(ages, f2[2,], type = "l", col="blue", lwd=2)
+points(ages, f3[2,], type = "l", col="green3", lwd=2)
+title(main="TREE 2 - Profile reconstruction")
+legend(x="topleft", bty="n", legend = c("model1","origin","model2","model3"),
+       col=c("black","red","blue","green3"), lwd = 4)
+axis(1, at= seq(118,1800,250),labels = c(118, 484, 664, 1004, 1231, 1372, 1582))
+
+```
+\newpage
+```{r}
+# tree 3
+matplot(ages, f1[3,], type = "l", lwd=2, ylab = "Circumference (mm)",xaxt='n')
+points(ages, data$Y[3,], type = "l", col="red", lwd=2)
+points(ages, f2[3,], type = "l", col="blue", lwd=2)
+points(ages, f3[3,], type = "l", col="green3", lwd=2)
+title(main="TREE 3 - Profile reconstruction")
+legend(x="topleft", bty="n", legend = c("model1","origin","model2","model3"),
+       col=c("black","red","blue","green3"), lwd = 4)
+axis(1, at= seq(118,1800,250),labels = c(118, 484, 664, 1004, 1231, 1372, 1582))
+
+```
+\newpage
+```{r}
+# tree 4
+matplot(ages, f1[4,], type = "l", lwd=2, ylab = "Circumference (mm)", ylim=c(0,210),xaxt='n')
+points(ages, data$Y[4,], type = "l", col="red", lwd=2)
+points(ages, f2[4,], type = "l", col="blue", lwd=2)
+points(ages, f3[4,], type = "l", col="green3", lwd=2)
+title(main="TREE 4 - Profile recontruction")
+legend(x="topleft", bty="n", legend = c("model1","origin","model2","model3"),
+       col=c("black","red","blue","green3"), lwd = 4)
+axis(1, at= seq(118,1800,250),labels = c(118, 484, 664, 1004, 1231, 1372, 1582))
+
+```
+\newpage
+```{r}
+# tree 5
+matplot(ages, f1[5,], type = "l", lwd=2, ylab = "Circumference (mm)", ylim=c(0,200),xaxt='n')
+points(ages, data$Y[5,], type = "l", col="red", lwd=2)
+points(ages, f2[5,], type = "l", col="blue", lwd=2)
+points(ages, f3[5,], type = "l", col="green3", lwd=2)
+title(main="TREE 5 - Profile reconstruction")
+legend(x="topleft", bty="n", legend = c("model1","origin","model2","model3"),
+       col=c("black","red","blue","green3"), lwd = 4)
+axis(1, at= seq(118,1800,250),labels = c(118, 484, 664, 1004, 1231, 1372, 1582))
+
+```
+\newpage
+
+
+### DIC evaluation
+
+```{r}
+par(mfrow=c(2,2))
+matplot(ages, t(f1), type = "b", lwd=2, ylab = "Circumference (mm)")
+legend('topleft',legend = c('Tree 1','Tree 2','Tree 3','Tree 4','Tree 5'),col=c('black','red','green3','blue','aquamarine'),lwd=3,bty = "n",lty=3,cex=0.65)
+title(main="Growth Reconstruction - Model 1")
+grid()
+
+matplot(ages, t(f2), type = "b", lwd=2, ylab = "Circumference (mm)")
+legend('topleft',legend = c('Tree 1','Tree 2','Tree 3','Tree 4','Tree 5'),col=c('black','red','green3','blue','aquamarine'),lwd=3,bty = "n",lty=3,cex=0.65)
+title(main="Growth Reconstruction - Model 2")
+grid()
+
+matplot(ages, t(f3), type = "b", lwd=2, ylab = "Circumference (mm)")
+legend('topleft',legend = c('Tree 1','Tree 2','Tree 3','Tree 4','Tree 5'),col=c('black','red','green3','blue','aquamarine'),lwd=3,bty = "n",lty=3,cex=0.65)
+title(main="Growth Reconstruction - Model 3")
+grid()
+
+matplot(ages, t(data$Y), type = "b", lwd=2, ylab = "Circumference (mm)")
+legend('topleft',legend = c('Tree 1','Tree 2','Tree 3','Tree 4','Tree 5'),col=c('black','red','green3','blue','aquamarine'),lwd=3,bty = "n",lty=3,cex=0.65)
+title(main="Growth Reconstruction - original data")
+grid()
+```
+
+Here we showed the DIC value for each parameter:
+```{r echo=FALSE}
+
+sprintf('Deviance information criterion --- Model 1 : %s',orange1$BUGSoutput$DIC)
+sprintf('Deviance information criterion --- Model 2 : %s',orange2$BUGSoutput$DIC)
+sprintf('Deviance information criterion --- Model 3 : %s',orange3$BUGSoutput$DIC)
+
+```
+We can state that the best model for these data is the second one, which has random effects on both $\beta_1$ and $\beta_2$. 
+
+\newpage
+
+Anyway, since the DIC is not a "stable" tool for model selection, we can check the reliability of our choice by counting how many times the model 2 DIC is actually the best one, over 100 simulation of _new_ data from our known model (MODEL 2).
+
+### Model selection check
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# MODEL SELECTION CHECK
+
+DICs = c()
+iterations = 100
+for(k in 1:iterations){
+  # SIMULATE NEW DATA FROM MODEL 2
+  new.y = matrix(ncol = 7, nrow = 5)
+  for(i in 1:5){
+    for(j in 1:7){
+      eta.m2 = orange2$BUGSoutput$mean$phi1[i] / (1+ exp(-(ages[j]-orange2$BUGSoutput$mean$phi2[i])/orange2$BUGSoutput$mean$phi3))
+      new.y[i,j] = rnorm(1, mean=eta.m2, sd=orange2$BUGSoutput$mean$sigmaC)
+    }
+  }
+  new.orange.data = list(n = 7, K = 5, x = ages, Y = new.y )
+  
+  parameters = c("mu1","tau1","sigma1","tauC","sigmaC","phi1","phi2","phi3")
+  inits = list(phi1=rep(0,new.orange.data$K), phi2 =0, phi3=1, mu1=0, tau1=0.1, tauC=1)
+  initial.values = list(inits)
+  new.orange1 = jags( data = new.orange.data,  inits = initial.values,
+                      parameters.to.save = parameters,
+                      model.file = "orange_trees_model_v2.txt",
+                      n.chain = 1,
+                      n.iter = 10000,
+                      n.burnin = 1000,
+                      n.thin = 1, 
+                      working.directory = "/Users/alfonsodamelio/Desktop/FinalProject",
+                      DIC = TRUE)
+  
+  parameters = c("mu1","mu2","tau1","tau2","sigma1","sigma2","tauC","sigmaC","phi1","phi2","phi3")
+  inits = list(phi1=rep(0,new.orange.data$K), phi2=rep(0,new.orange.data$K),
+               phi3=1, mu1=0, mu2=0, tau1=0.1, tau2=0.1, tauC=1)
+  initial.values = list(inits)
+  new.orange2 = jags( data = new.orange.data,  inits = initial.values,
+                      parameters.to.save = parameters,
+                      model.file = "orange_trees_model_v3.txt",
+                      n.chain = 1,
+                      n.iter = 10000,
+                      n.burnin = 1000,
+                      n.thin = 1, 
+                      working.directory = "/Users/alfonsodamelio/Desktop/FinalProject",
+                      DIC = TRUE)
+  
+  parameters = c("mu1","tau1","mu2","tau2","mu3",
+                 "tau3","sigma1","sigma2","sigma3","tauC","sigmaC",
+                 "phi1","phi2","phi3")
+  inits = list(phi1=rep(0,new.orange.data$K), phi2 =rep(0,new.orange.data$K),
+               phi3=rep(1,new.orange.data$K),
+               mu1=0, mu2=0, mu3=0, tau1=0.1, tau2=0.1, tau3=0.1, tauC=1)
+  initial.values = list(inits)
+  
+  new.orange3 = jags( data = new.orange.data,  inits = initial.values,
+                      parameters.to.save = parameters,
+                      model.file = "orange_trees_model_v4.txt",
+                      n.chain = 1,
+                      n.iter = 10000,
+                      n.burnin = 1000,
+                      n.thin = 1,
+                      working.directory = "/Users/alfonsodamelio/Desktop/FinalProject",
+                      DIC = TRUE)
+  
+  DICs[k] = which.min(c(new.orange1$BUGSoutput$DIC, new.orange2$BUGSoutput$DIC, new.orange3$BUGSoutput$DIC))
+}
+
+
+```
+
+```{r}
+print(table(DICs))
+plt = barplot(table(DICs), xlab = "Models", ylab = "freq", 
+              main = "Best DIC simulating from model 2", col = "aquamarine", ylim = c(0,100))
+text(x = plt, y=table(DICs), label = table(DICs), pos = 3, cex = 1, col = "black")
+grid()
+```
+
+
+
+## Evaluate Jags simulation
+
+At this point we are able to evaluate the chains of each parameter obtained by JAGS simulations and visualize the approximated marginal posteriors.
+
+```{r echo=TRUE}
+#here i show the effective size of each parameter of the model chosen
+print(effectiveSize(orange2))
+```
+```{r echo=TRUE}
+#correlation plot
+mod1.fit.gg <- ggs(as.mcmc(orange2))
+ggs_crosscorrelation(mod1.fit.gg, absolute_scale = FALSE)
+```
+
+
+```{r}
+# MODEL 2
+mu1 = mcmc(orange2$BUGSoutput$sims.array[,1,c("mu1")])
+mu2 = mcmc(orange2$BUGSoutput$sims.array[,1,c("mu2")])
+
+sigma1 = mcmc(orange2$BUGSoutput$sims.array[,1,c("sigma1")])
+sigma2 = mcmc(orange2$BUGSoutput$sims.array[,1,c("sigma2")])
+sigmaC = mcmc(orange2$BUGSoutput$sims.array[,1,c("sigmaC")])
+
+phi1$i1 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[1]")])
+phi1$i2 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[2]")])
+phi1$i3 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[3]")])
+phi1$i4 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[4]")])
+phi1$i5 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi1[5]")])
+
+phi2$i1 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[1]")])
+phi2$i2 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[2]")])
+phi2$i3 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[3]")])
+phi2$i4 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[4]")])
+phi2$i5 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi2[5]")])
+phi3 = mcmc(orange2$BUGSoutput$sims.array[,1,c("phi3")])
+
+print(orange2$BUGSoutput$mean)
+```
+\newpage
+One way to see if our chain has converged is to see how well our chain is mixing, or moving around the parameter space.
+
+If our chain is taking a long time to move around the parameter space, then it will take longer to converge.
+
+We can see how well our chain is mixing through visual inspection.We need to do the inspections for every parameter.
+
+Here we used:
+
++ **Traceplots**
+
++ **Autocorrelation plots**:
+    + from which we would expect the $k_{th}$ lag autocorrelation to be smaller as k increases.
+
+$$ρ_k = \frac{\sum_{i=1}^{n-k}(x_i − \bar x)(x_{i+k} − \bar x)}{\sum_{i=1}^{n}(x_i − \bar x)^2}$$
+  
+
++ We can also use **running mean plots** to check how well our chains are mixing:
+    + A running mean plot is a plot of the iterations against the mean of the draws up to each iteration.
+  
+```{r}
+par(mfrow=c(2,3))
+traceplot(mu1, main = expression(paste("Traceplot of ",mu,"1")),col='red2')
+acf(mu1, lag.max = 1000, main = "ACF")
+plot(cumsum(mu1)/(1:length(mu1)), type="l", ylab="",
+main="behaviour empirical average", xlab="simulations",col='red')
+
+
+
+traceplot(mu2, main = expression(paste("Traceplot of ",mu,"2")))
+acf(mu2, lag.max = 1000, main = "ACF")
+plot(cumsum(mu2)/(1:length(mu2)), type="l", ylab="",
+main="behaviour empirical average", xlab="simulations")
+```
+\newpage
+```{r}
+par(mfrow=c(3,3))
+traceplot(sigma1, main = expression(paste("Traceplot of ",sigma,"1")),col='green3')
+acf(sigma1, lag.max = 1000, main = "ACF")
+plot(cumsum(sigma1)/(1:length(sigma1)), type="l", ylab="",
+main="behaviour empirical average", xlab="simulations",col='green3')
+
+
+traceplot(sigma2, main = expression(paste("Traceplot of ",sigma,"2")),col='blue')
+acf(sigma2, lag.max = 1000, main = "ACF")
+plot(cumsum(sigma2)/(1:length(sigma2)), type="l", ylab="",
+main="behaviour empirical average", xlab="simulations",col='blue')
+
+traceplot(sigmaC, main = expression(paste("Traceplot of ",sigma,"C")),col='orchid')
+acf(sigmaC, lag.max = 1000, main = "ACF")
+plot(cumsum(sigmaC)/(1:length(sigmaC)), type="l", ylab="",
+main="behaviour empirical average", xlab="simulations",col='orchid')
+```
+
+
+\newpage
+```{r}
+par(mfrow=c(1,1))
+hist(mu1,breaks = 100, main = expression(paste("Histogram of ",mu,"1")), freq = F,col = rgb(0.3,0.5,0.3),xlab = expression(paste(mu,"1")))
+abline(v=orange2$BUGSoutput$mean$mu1, lwd=3, col="blue")
+legend('topleft',legend = expression(paste("mean of ",mu,"1 chain")),col ='blue',lwd=3,bty='n')
+
+```
+\newpage
+```{r}
+hist(mu2,breaks = 100, main = expression(paste("Histogram of ",mu,"2")), freq = F,xlab = expression(paste(mu,"2")))
+abline(v=orange2$BUGSoutput$mean$mu2, lwd=3, col="green2")
+legend('topleft',legend = expression(paste("mean of ",mu,"2 chain")),col ='green2',lwd=3,bty='n')
+
+```
+\newpage
+```{r}
+hist(sigma1,breaks = 100, main = expression(paste("Histogram of ",sigma,"1")), freq = F,col = rgb(0.2,0.1,0.3),xlab = expression(paste(sigma,"1")))
+abline(v=orange2$BUGSoutput$mean$sigma1, lwd=3, col="red")
+legend('topright',legend = expression(paste("mean of ",sigma,"1 chain")),col ='red',lwd=3,bty='n')
+
+```
+\newpage
+```{r}
+hist(sigma2,breaks = 100, main = expression(paste("Histogram of ",sigma,"2")), freq = F,xlab = expression(paste(sigma,"2")),col = rgb(0.7,0.1,0.2))
+abline(v=orange2$BUGSoutput$mean$sigma2, lwd=3, col="orchid")
+legend('topright',legend = expression(paste("mean of ",sigma,"2 chain")),col ='orchid',lwd=3,bty='n')
+
+```
+\newpage
+```{r}
+hist(sigmaC,breaks = 100, main = expression(paste("Histogram of ",sigma,"C")), freq = F,xlab = expression(paste(sigma,"C")),col = 'aquamarine')
+abline(v=orange2$BUGSoutput$mean$sigmaC, lwd=3, col="black")
+legend('topright',legend = expression(paste("mean of ",sigma,"C chain")),col ='black',lwd=3,bty='n')
+
+```
+
+#### Another kind of of convergence diagnostic is the *Gelman and Rubin*, but it requires more than 1 chain.
+Steps (for each parameter):
+
+1. Run m ≥ 2 chains of length 2n from overdispersed starting
+values.
+2. Discard the first n draws in each chain.
+3. Calculate the within-chain and between-chain variance.
+4. Calculate the estimated variance of the parameter as a
+weighted sum of the within-chain and between-chain variance.
+5. Calculate the potential scale reduction factor.
+
+
